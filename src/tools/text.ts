@@ -161,31 +161,74 @@ export const textHandlers: [string, Handler][] = [
     const p = schema.parse(args);
     const result = await browserManager.evaluateWithArg((p: any) => {
       const editor = (window as any).__opencut;
-      let targetTrackId = p.trackId;
-      if (!targetTrackId) {
-        targetTrackId = editor.timeline.addTrack({ type: "text" });
-      }
+      const scene = editor.scenes.getActiveScene();
+      const targetTrackId = p.trackId ?? crypto.randomUUID();
+      const ticksPerSecond = 120_000;
+      const startTime =
+        p.startTime === undefined
+          ? editor.playback.getCurrentTime()
+          : Math.round(p.startTime * ticksPerSecond);
       const element = {
         id: crypto.randomUUID(),
         type: "text",
         name: p.content.substring(0, 20),
-        content: p.content,
-        duration: p.duration ?? 3,
-        startTime: p.startTime ?? editor.playback.getCurrentTime(),
+        duration: Math.round((p.duration ?? 3) * ticksPerSecond),
+        startTime,
         trimStart: 0,
-        trimEnd: p.duration ?? 3,
-        fontSize: p.fontSize ?? 48,
-        fontFamily: p.fontFamily ?? "Inter",
-        color: p.color ?? "#ffffff",
-        textAlign: p.textAlign ?? "center",
-        fontWeight: p.fontWeight ?? "normal",
-        fontStyle: p.fontStyle ?? "normal",
-        textDecoration: "none",
-        opacity: 1,
-        transform: { x: p.x ?? 0, y: p.y ?? 0, scaleX: 1, scaleY: 1, rotation: 0 },
-        background: { enabled: false, color: "#000000", cornerRadius: 4, paddingX: 8, paddingY: 4 },
+        trimEnd: 0,
+        params: {
+          content: p.content,
+          fontSize: p.fontSize ?? 48,
+          fontFamily: p.fontFamily ?? "Inter",
+          color: p.color ?? "#ffffff",
+          textAlign: p.textAlign ?? "center",
+          fontWeight: p.fontWeight ?? "normal",
+          fontStyle: p.fontStyle ?? "normal",
+          textDecoration: "none",
+          letterSpacing: 0,
+          lineHeight: 1.2,
+          "background.enabled": false,
+          "background.color": "#000000",
+          "background.cornerRadius": 0,
+          "background.paddingX": 30,
+          "background.paddingY": 42,
+          "background.offsetX": 0,
+          "background.offsetY": 0,
+          "transform.positionX": p.x ?? 0,
+          "transform.positionY": p.y ?? 0,
+          "transform.scaleX": 1,
+          "transform.scaleY": 1,
+          "transform.rotate": 0,
+          opacity: 1,
+          blendMode: "normal",
+        },
       };
-      editor.timeline.insertElement({ element, placement: { mode: "explicit", trackId: targetTrackId } });
+
+      const existingTrack = scene.tracks.overlay.find(
+        (track: any) => track.id === targetTrackId && track.type === "text",
+      );
+      if (p.trackId && !existingTrack) {
+        throw new Error(`Text track not found: ${p.trackId}`);
+      }
+      const overlay = existingTrack
+        ? scene.tracks.overlay.map((track: any) =>
+            track.id === targetTrackId
+              ? { ...track, elements: [...track.elements, element] }
+              : track,
+          )
+        : [
+            ...scene.tracks.overlay,
+            {
+              id: targetTrackId,
+              name: "Text",
+              type: "text",
+              elements: [element],
+              hidden: false,
+            },
+          ];
+      editor.scenes.updateSceneTracks({
+        tracks: { ...scene.tracks, overlay },
+      });
       return { elementId: element.id, trackId: targetTrackId };
     }, p);
     return { success: true, ...result };
@@ -194,7 +237,12 @@ export const textHandlers: [string, Handler][] = [
   ["text_update_content", async (args) => {
     const { trackId, elementId, content } = z.object({ trackId: z.string(), elementId: z.string(), content: z.string() }).parse(args);
     await browserManager.evaluateWithArg(({ trackId, elementId, content }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates: { content } }] });
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params: { ...element.params, content } } }],
+      });
     }, { trackId, elementId, content });
     return { success: true };
   }],
@@ -210,7 +258,12 @@ export const textHandlers: [string, Handler][] = [
     const { trackId, elementId, ...updates } = schema.parse(args);
     const filtered = Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== undefined));
     await browserManager.evaluateWithArg(({ trackId, elementId, updates }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates }] });
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params: { ...element.params, ...updates } } }],
+      });
     }, { trackId, elementId, updates: filtered });
     return { success: true };
   }],
@@ -225,7 +278,12 @@ export const textHandlers: [string, Handler][] = [
     const { trackId, elementId, ...updates } = schema.parse(args);
     const filtered = Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== undefined));
     await browserManager.evaluateWithArg(({ trackId, elementId, updates }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates }] });
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params: { ...element.params, ...updates } } }],
+      });
     }, { trackId, elementId, updates: filtered });
     return { success: true };
   }],
@@ -240,10 +298,25 @@ export const textHandlers: [string, Handler][] = [
     const { trackId, elementId, ...bgUpdates } = schema.parse(args);
     const filtered = Object.fromEntries(Object.entries(bgUpdates).filter(([, v]) => v !== undefined));
     await browserManager.evaluateWithArg(({ trackId, elementId, bg }: any) => {
-      const track = (window as any).__opencut.timeline.getTrackById({ trackId });
-      const el = track?.elements.find((e: any) => e.id === elementId);
-      (window as any).__opencut.timeline.updateElements({
-        updates: [{ trackId, elementId, updates: { background: { ...el?.background, ...bg } } }],
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      const params = { ...element.params };
+      const keys: Record<string, string> = {
+        enabled: "background.enabled",
+        color: "background.color",
+        cornerRadius: "background.cornerRadius",
+        paddingX: "background.paddingX",
+        paddingY: "background.paddingY",
+        offsetX: "background.offsetX",
+        offsetY: "background.offsetY",
+      };
+      for (const [key, value] of Object.entries(bg)) {
+        const paramKey = keys[key];
+        if (paramKey) params[paramKey] = value;
+      }
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params } }],
       });
     }, { trackId, elementId, bg: filtered });
     return { success: true };
@@ -259,10 +332,23 @@ export const textHandlers: [string, Handler][] = [
     const { trackId, elementId, ...t } = schema.parse(args);
     const filtered = Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined));
     await browserManager.evaluateWithArg(({ trackId, elementId, tf }: any) => {
-      const track = (window as any).__opencut.timeline.getTrackById({ trackId });
-      const el = track?.elements.find((e: any) => e.id === elementId);
-      (window as any).__opencut.timeline.updateElements({
-        updates: [{ trackId, elementId, updates: { transform: { ...el?.transform, ...tf } } }],
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      const params = { ...element.params };
+      const keys: Record<string, string> = {
+        x: "transform.positionX",
+        y: "transform.positionY",
+        scaleX: "transform.scaleX",
+        scaleY: "transform.scaleY",
+        rotation: "transform.rotate",
+      };
+      for (const [key, value] of Object.entries(tf)) {
+        const paramKey = keys[key];
+        if (paramKey) params[paramKey] = value;
+      }
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params } }],
       });
     }, { trackId, elementId, tf: filtered });
     return { success: true };
@@ -271,7 +357,12 @@ export const textHandlers: [string, Handler][] = [
   ["text_update_blend_mode", async (args) => {
     const { trackId, elementId, blendMode } = z.object({ trackId: z.string(), elementId: z.string(), blendMode: z.string() }).parse(args);
     await browserManager.evaluateWithArg(({ trackId, elementId, blendMode }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates: { blendMode } }] });
+      const editor = (window as any).__opencut;
+      const element = editor.timeline.getTrackById({ trackId })?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      editor.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params: { ...element.params, blendMode } } }],
+      });
     }, { trackId, elementId, blendMode });
     return { success: true };
   }],
@@ -283,7 +374,7 @@ export const textHandlers: [string, Handler][] = [
       for (const t of tracks) {
         if (t.type === "text") {
           for (const el of t.elements) {
-            textEls.push({ trackId: t.id, elementId: el.id, content: el.content, startTime: el.startTime, duration: el.duration });
+            textEls.push({ trackId: t.id, elementId: el.id, content: el.params?.content, startTime: el.startTime, duration: el.duration });
           }
         }
       }

@@ -89,7 +89,8 @@ export const playbackHandlers: [string, Handler][] = [
   ["playback_seek", async (args) => {
     const { time } = z.object({ time: z.number() }).parse(args);
     await browserManager.evaluateWithArg((t: number) => {
-      (window as any).__opencut.playback.seek({ time: t });
+      const ticksPerSecond = 120_000;
+      (window as any).__opencut.playback.seek({ time: Math.round(t * ticksPerSecond) });
     }, time);
     return { success: true, time };
   }],

@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page, type BrowserServer } from "playwright";
+import * as fs from "node:fs/promises";
 
 export type SafeResult<T> =
   | { ok: true; data: T }
@@ -7,6 +8,7 @@ export type SafeResult<T> =
 const EDITOR_BASE = process.env.OPENCUT_URL ?? "http://localhost:3001";
 const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 200;
+const EDITOR_BASE_URL = EDITOR_BASE.replace(/\/$/, "");
 
 class BrowserManager {
   private server: BrowserServer | null = null;
@@ -16,6 +18,7 @@ class BrowserManager {
   private currentProjectId: string | null = null;
   private launchPromise: Promise<void> | null = null;
   private navLock: Promise<unknown> = Promise.resolve();
+  private persistentContext = false;
 
   launch(): Promise<void> {
     if (!this.launchPromise) {
@@ -33,16 +36,24 @@ class BrowserManager {
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     };
 
-    if (process.platform === "win32") {
-      this.server = await chromium.launchServer(launchOpts);
-      this.browser = await chromium.connect(this.server.wsEndpoint());
+    const profileDir = process.env.MCP_PROFILE_DIR?.trim();
+    if (profileDir && process.platform !== "win32") {
+      await fs.mkdir(profileDir, { recursive: true });
+      this.context = await chromium.launchPersistentContext(profileDir, launchOpts);
+      this.browser = this.context.browser();
+      this.persistentContext = true;
     } else {
-      this.browser = await chromium.launch(launchOpts);
+      if (process.platform === "win32") {
+        this.server = await chromium.launchServer(launchOpts);
+        this.browser = await chromium.connect(this.server.wsEndpoint());
+      } else {
+        this.browser = await chromium.launch(launchOpts);
+      }
+      this.context = await this.browser.newContext();
     }
 
-    this.context = await this.browser.newContext();
-    this.page = await this.context.newPage();
-    await this.page.goto(EDITOR_BASE);
+    this.page = this.context.pages()[0] ?? await this.context.newPage();
+    await this.page.goto(`${EDITOR_BASE_URL}/projects`);
   }
 
   private async ensureReady(): Promise<void> {
@@ -67,8 +78,7 @@ class BrowserManager {
         const ready = await this.isEditorReady();
         if (ready) return;
       }
-      await this.page!.goto(`${EDITOR_BASE}/editor/${projectId}`);
-      await this.waitForEditorReady();
+      await this.navigateAndWaitForEditor(`${EDITOR_BASE_URL}/editor/${projectId}`);
       this.currentProjectId = projectId;
     });
   }
@@ -76,7 +86,7 @@ class BrowserManager {
   async navigateToHome(): Promise<void> {
     return this.withNavLock(async () => {
       await this.ensureReady();
-      await this.page!.goto(`${EDITOR_BASE}/projects`);
+      await this.page!.goto(`${EDITOR_BASE_URL}/projects`);
       this.currentProjectId = null;
     });
   }
@@ -85,8 +95,7 @@ class BrowserManager {
     return this.withNavLock(async () => {
       await this.ensureReady();
       const placeholder = `new-${Date.now()}`;
-      await this.page!.goto(`${EDITOR_BASE}/editor/${placeholder}`);
-      await this.waitForEditorReady();
+      await this.navigateAndWaitForEditor(`${EDITOR_BASE_URL}/editor/${placeholder}`);
       const id: string = await this.page!.evaluate(() => {
         return (window as any).__opencut.project.getActive().metadata.id;
       });
@@ -97,10 +106,36 @@ class BrowserManager {
 
   private async isEditorReady(): Promise<boolean> {
     if (!this.page) return false;
-    return this.page.evaluate(() => {
-      const w = window as any;
-      return !!(w.__opencut && w.__opencut.project.getActiveOrNull());
-    });
+    try {
+      return await this.page.evaluate(() => {
+        const project = (window as any).__opencut?.project;
+        return typeof project?.getActiveOrNull === "function" && !!project.getActiveOrNull();
+      });
+    } catch {
+      // Navigation can temporarily detach the execution context. Keep polling.
+      return false;
+    }
+  }
+
+  private async navigateAndWaitForEditor(url: string): Promise<void> {
+    let lastError = "unknown error";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (attempt === 0) {
+          await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        } else {
+          // A stale browser tab or cached app bundle can miss the bridge on first load.
+          await this.page!.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        }
+        await this.waitForEditorReady();
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const diagnostics = await this.getPageDiagnostics();
+    throw new Error(`Editor did not become ready after a page reload: ${lastError}. Page: ${JSON.stringify(diagnostics)}`);
   }
 
   private async waitForEditorReady(): Promise<void> {
@@ -110,7 +145,30 @@ class BrowserManager {
       if (ready) return;
       await new Promise((r) => setTimeout(r, READY_POLL_MS));
     }
-    throw new Error(`Editor not ready after ${READY_TIMEOUT_MS}ms`);
+    const diagnostics = await this.getPageDiagnostics();
+    throw new Error(`Editor not ready after ${READY_TIMEOUT_MS}ms. Page: ${JSON.stringify(diagnostics)}`);
+  }
+
+  private async getPageDiagnostics(): Promise<Record<string, unknown>> {
+    if (!this.page) return { page: "unavailable" };
+    try {
+      return await this.page.evaluate(() => {
+        const w = window as any;
+        return {
+          url: window.location.href,
+          title: document.title,
+          readyState: document.readyState,
+          bridgeAvailable: !!w.__opencut,
+          projectApiAvailable: typeof w.__opencut?.project?.getActiveOrNull === "function",
+          activeProjectId: w.__opencut?.project?.getActiveOrNull?.()?.metadata?.id ?? null,
+        };
+      });
+    } catch (error) {
+      return {
+        url: this.page.url(),
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /** Safe evaluate with error handling — never throws */
@@ -172,7 +230,7 @@ class BrowserManager {
 
   /** Direct HTTP API call (no browser context needed) */
   async fetchApi(path: string, init?: RequestInit): Promise<Response> {
-    return fetch(`${EDITOR_BASE}${path}`, init);
+    return fetch(`${EDITOR_BASE_URL}${path}`, init);
   }
 
   async getPage(): Promise<Page> {
@@ -185,13 +243,18 @@ class BrowserManager {
   }
 
   async close(): Promise<void> {
-    await this.browser?.close();
+    if (this.persistentContext) {
+      await this.context?.close();
+    } else {
+      await this.browser?.close();
+    }
     await this.server?.close();
     this.browser = null;
     this.server = null;
     this.context = null;
     this.page = null;
     this.currentProjectId = null;
+    this.persistentContext = false;
   }
 }
 

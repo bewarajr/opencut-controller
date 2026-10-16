@@ -92,7 +92,13 @@ export const audioHandlers: [string, Handler][] = [
       trackId: z.string(), elementId: z.string(), volume: z.number().min(0).max(1),
     }).parse(args);
     await browserManager.evaluateWithArg(({ trackId, elementId, volume }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates: { volume } }] });
+      const track = (window as any).__opencut.timeline.getTrackById({ trackId });
+      const element = track?.elements.find((item: any) => item.id === elementId);
+      if (!element) throw new Error(`Timeline element ${elementId} not found`);
+      const volumeDb = volume === 0 ? -60 : 20 * Math.log10(volume);
+      (window as any).__opencut.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { params: { ...element.params, volume: volumeDb } } }],
+      });
     }, { trackId, elementId, volume });
     return { success: true };
   }],

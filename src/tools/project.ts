@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { browserManager } from "../browser.js";
+import { numberToFrameRate } from "../media-time.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { listCloudProjects, syncCurrentProjectToCloud } from "../cloud-sync.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 
@@ -135,7 +137,8 @@ export const projectHandlers: [string, Handler][] = [
     await browserManager.evaluateAsyncWithArg(async ({ id, name }: { id: string; name: string }) => {
       await (window as any).__opencut.project.renameProject({ id, name });
     }, { id, name });
-    return { success: true, id };
+    const cloud = await syncCurrentProjectToCloud();
+    return { success: true, id, cloud };
   }],
 
   ["project_load", async (args) => {
@@ -145,8 +148,9 @@ export const projectHandlers: [string, Handler][] = [
   }],
 
   ["project_save", async () => {
-    await browserManager.evaluate(() => { (window as any).__opencut.save.flush(); });
-    return { success: true };
+    await browserManager.evaluate(async () => { await (window as any).__opencut.save.flush(); });
+    const cloud = await syncCurrentProjectToCloud();
+    return { success: true, cloud };
   }],
 
   ["project_delete", async (args) => {
@@ -154,6 +158,14 @@ export const projectHandlers: [string, Handler][] = [
     await browserManager.evaluateAsyncWithArg(async (projectId: string) => {
       await (window as any).__opencut.project.deleteProjects({ ids: [projectId] });
     }, id);
+    const cloudProjects = await listCloudProjects();
+    if (cloudProjects?.some((project: any) => project.id === id)) {
+      const response = await fetch(`${(process.env.OPENCUT_API_URL ?? `${process.env.OPENCUT_URL ?? "https://opencut.bewara.xyz"}/api/cloud`).replace(/\/$/, "")}/projects/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${process.env.OPENCUT_API_TOKEN}` },
+      });
+      if (!response.ok) throw new Error(`Could not delete cloud project (${response.status})`);
+    }
     return { success: true };
   }],
 
@@ -170,7 +182,12 @@ export const projectHandlers: [string, Handler][] = [
       if (projects !== null) break;
       await new Promise((r) => setTimeout(r, 300));
     }
-    return { projects: projects ?? [] };
+    const cloudProjects = await listCloudProjects();
+    if (!cloudProjects) return { projects: projects ?? [], cloudConnected: false };
+    const byId = new Map<string, any>();
+    for (const project of projects ?? []) byId.set((project as any).id, project);
+    for (const project of cloudProjects as any[]) byId.set(project.id, project);
+    return { projects: [...byId.values()], cloudConnected: true };
   }],
 
   ["project_get_active", async () => {
@@ -198,7 +215,8 @@ export const projectHandlers: [string, Handler][] = [
     await browserManager.evaluateAsyncWithArg(async ({ id, name }: { id: string; name: string }) => {
       await (window as any).__opencut.project.renameProject({ id, name });
     }, { id, name });
-    return { success: true };
+    const cloud = await syncCurrentProjectToCloud();
+    return { success: true, cloud };
   }],
 
   ["project_update_settings", async (args) => {
@@ -211,9 +229,9 @@ export const projectHandlers: [string, Handler][] = [
       blurIntensity: z.number().optional(),
     });
     const parsed = schema.parse(args);
-    await browserManager.evaluateWithArg((p: typeof parsed) => {
+    await browserManager.evaluateWithArg((p: typeof parsed & { frameRate?: { numerator: number; denominator: number } }) => {
       const settings: any = {};
-      if (p.fps !== undefined) settings.fps = p.fps;
+      if (p.fps !== undefined) settings.fps = p.frameRate;
       if (p.canvasWidth !== undefined || p.canvasHeight !== undefined) {
         const current = (window as any).__opencut.project.getActive().settings.canvasSize;
         settings.canvasSize = {
@@ -230,8 +248,9 @@ export const projectHandlers: [string, Handler][] = [
         };
       }
       (window as any).__opencut.project.updateSettings({ settings });
-    }, parsed);
-    return { success: true };
+    }, { ...parsed, frameRate: parsed.fps === undefined ? undefined : numberToFrameRate(parsed.fps) });
+    const cloud = await syncCurrentProjectToCloud();
+    return { success: true, cloud };
   }],
 
   ["project_get_timeline_view_state", async () => {
@@ -292,6 +311,10 @@ export const projectHandlers: [string, Handler][] = [
     const newIds = await browserManager.evaluateAsyncWithArg(async (ids: string[]) => {
       return await (window as any).__opencut.project.duplicateProjects({ ids });
     }, ids);
-    return { success: true, newIds };
+    const cloudResults = await Promise.all((newIds as string[]).map(async (id) => {
+      await browserManager.navigateToEditor(id);
+      return await syncCurrentProjectToCloud();
+    }));
+    return { success: true, newIds, cloudResults };
   }],
 ];

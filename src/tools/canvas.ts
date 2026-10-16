@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { browserManager } from "../browser.js";
+import { numberToFrameRate } from "../media-time.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -103,10 +104,11 @@ export const canvasHandlers: [string, Handler][] = [
 
   ["canvas_set_fps", async (args) => {
     const { fps } = z.object({ fps: z.number() }).parse(args);
-    await browserManager.evaluateWithArg((fps: number) => {
+    const frameRate = numberToFrameRate(fps);
+    await browserManager.evaluateWithArg((fps: { numerator: number; denominator: number }) => {
       (window as any).__opencut.project.updateSettings({ settings: { fps } });
-    }, fps);
-    return { success: true, fps };
+    }, frameRate);
+    return { success: true, fps, frameRate };
   }],
 
   ["canvas_set_background", async (args) => {

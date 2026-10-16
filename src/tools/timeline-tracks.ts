@@ -105,12 +105,14 @@ export const timelineTracksHandlers: [string, Handler][] = [
 
   ["timeline_track_list", async () => {
     const tracks = await browserManager.evaluate(() => {
-      return (window as any).__opencut.timeline.getTracks().map((t: any) => ({
-        id: t.id,
-        type: t.type,
-        muted: t.muted,
-        hidden: t.hidden,
-        elementCount: t.elements.length,
+      const sceneTracks = (window as any).__opencut.scenes.getActiveScene().tracks;
+      const tracks = [sceneTracks.main, ...sceneTracks.overlay, ...sceneTracks.audio];
+      return tracks.map((track: any) => ({
+        id: track.id,
+        type: track.type,
+        muted: track.muted,
+        hidden: track.hidden,
+        elementCount: track.elements.length,
       }));
     });
     return { tracks };

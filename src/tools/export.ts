@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { browserManager } from "../browser.js";
+import { numberToFrameRate } from "../media-time.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -71,6 +72,7 @@ export const exportHandlers: [string, Handler][] = [
     const { format, quality, fps, includeAudio, pollIntervalMs, timeoutMs } = schema.parse(args);
 
     // Start export
+    const frameRate = fps === undefined ? undefined : numberToFrameRate(fps);
     await browserManager.evaluateWithArg(({ format, quality, fps, includeAudio }: any) => {
       (window as any).__opencut.project.export({
         options: {
@@ -80,7 +82,7 @@ export const exportHandlers: [string, Handler][] = [
           includeAudio: includeAudio ?? true,
         },
       });
-    }, { format, quality, fps, includeAudio });
+    }, { format, quality, fps: frameRate, includeAudio });
 
     // Poll for completion
     const maxWait = timeoutMs ?? 300_000;
@@ -124,9 +126,10 @@ export const exportHandlers: [string, Handler][] = [
 
   ["export_set_fps", async (args) => {
     const { fps } = z.object({ fps: z.number() }).parse(args);
-    await browserManager.evaluateWithArg((fps: number) => {
+    const frameRate = numberToFrameRate(fps);
+    await browserManager.evaluateWithArg((fps: { numerator: number; denominator: number }) => {
       (window as any).__opencut.project.updateSettings({ settings: { fps } });
-    }, fps);
-    return { success: true, fps };
+    }, frameRate);
+    return { success: true, fps, frameRate };
   }],
 ];

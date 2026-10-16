@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { browserManager } from "../browser.js";
+import { secondsToMediaTime } from "../media-time.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -257,7 +258,7 @@ export const timelineElementsHandlers: [string, Handler][] = [
     }).parse(args);
     await browserManager.evaluateWithArg(({ elements, splitTime }: { elements: any[]; splitTime: number }) => {
       (window as any).__opencut.timeline.splitElements({ elements, splitTime });
-    }, { elements, splitTime });
+    }, { elements, splitTime: secondsToMediaTime(splitTime) });
     return { success: true };
   }],
 
@@ -271,7 +272,11 @@ export const timelineElementsHandlers: [string, Handler][] = [
     const parsed = schema.parse(args);
     await browserManager.evaluateWithArg((p: typeof parsed) => {
       (window as any).__opencut.timeline.updateElementTrim(p);
-    }, parsed);
+    }, {
+      ...parsed,
+      ...(parsed.trimStart !== undefined && { trimStart: secondsToMediaTime(parsed.trimStart) }),
+      ...(parsed.trimEnd !== undefined && { trimEnd: secondsToMediaTime(parsed.trimEnd) }),
+    });
     return { success: true };
   }],
 
@@ -280,8 +285,10 @@ export const timelineElementsHandlers: [string, Handler][] = [
       trackId: z.string(), elementId: z.string(), duration: z.number(),
     }).parse(args);
     await browserManager.evaluateWithArg(({ trackId, elementId, duration }: any) => {
-      (window as any).__opencut.timeline.updateElementDuration({ trackId, elementId, duration });
-    }, { trackId, elementId, duration });
+      (window as any).__opencut.timeline.updateElements({
+        updates: [{ trackId, elementId, patch: { duration } }],
+      });
+    }, { trackId, elementId, duration: secondsToMediaTime(duration) });
     return { success: true };
   }],
 
@@ -290,9 +297,16 @@ export const timelineElementsHandlers: [string, Handler][] = [
       elements: z.array(z.object({ trackId: z.string(), elementId: z.string() })),
       startTime: z.number(),
     }).parse(args);
+    const ticks = secondsToMediaTime(startTime);
     await browserManager.evaluateWithArg(({ elements, startTime }: any) => {
-      (window as any).__opencut.timeline.updateElementStartTime({ elements, startTime });
-    }, { elements, startTime });
+      (window as any).__opencut.timeline.updateElements({
+        updates: elements.map(({ trackId, elementId }: any) => ({
+          trackId,
+          elementId,
+          patch: { startTime },
+        })),
+      });
+    }, { elements, startTime: ticks });
     return { success: true };
   }],
 
@@ -325,7 +339,7 @@ export const timelineElementsHandlers: [string, Handler][] = [
       updates: z.record(z.string(), z.unknown()),
     }).parse(args);
     await browserManager.evaluateWithArg(({ trackId, elementId, updates }: any) => {
-      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, updates }] });
+      (window as any).__opencut.timeline.updateElements({ updates: [{ trackId, elementId, patch: updates }] });
     }, { trackId, elementId, updates });
     return { success: true };
   }],
